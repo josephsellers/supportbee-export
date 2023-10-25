@@ -10,6 +10,7 @@ auth_token = '[[INSERT-AUTH-TOKEN]]'
 
 #get the total number of tickets
 #more options here: https://developers.supportbee.com/api
+requests.packages.urllib3.disable_warnings()
 response = requests.get("{0}/tickets?auth_token={1}&archived=any&per_page=1&page=1".format(base_url, auth_token), verify=False, headers={'Content-type': 'application/json', 'Accept': 'application/json'})
 
 page = response.json()
@@ -35,9 +36,9 @@ try:
 	    cur.execute("DROP TABLE IF EXISTS CommentAttachments")
 
 	    cur.execute("CREATE TABLE Tickets(Id INT PRIMARY KEY ASC, SupportbeeID INT, Subject TEXT, CreationDate TEXT, CreatedBy TEXT, AssignedTo TEXT, Content TEXT, Label TEXT, Status TEXT)")
-	    cur.execute("CREATE TABLE TicketAttachments(Id INT PRIMARY KEY ASC, TicketId INT, FileName TEXT, CreationDate TEXT, ContentType TEXT, File BLOB)")
+	    cur.execute("CREATE TABLE TicketAttachments(Id INT, TicketId INT, FileName TEXT, CreationDate TEXT, ContentType TEXT, File BLOB)")
 	    cur.execute("CREATE TABLE Replies(Id INT PRIMARY KEY ASC, SupportbeeID INT, Subject TEXT, CreationDate TEXT, Replier TEXT, Content TEXT, Label TEXT, Status TEXT)")
-	    cur.execute("CREATE TABLE ReplyAttachments(Id INT PRIMARY KEY ASC, TicketId INT, FileName TEXT, CreationDate TEXT, ContentType TEXT, File BLOB)")
+	    cur.execute("CREATE TABLE ReplyAttachments(Id INT, TicketId INT, SupportbeeID INT, FileName TEXT, CreationDate TEXT, ContentType TEXT, File BLOB)")
 	    cur.execute("CREATE TABLE Comments(Id INT PRIMARY KEY ASC, TicketId INT, CreationDate TEXT, CreatedBy TEXT, Content TEXT)")
 	    cur.execute("CREATE TABLE CommentAttachments(Id INT PRIMARY KEY ASC, CommentId INT, FileName TEXT, CreationDate TEXT, ContentType TEXT, File BLOB)")
 
@@ -61,7 +62,7 @@ try:
 		tickets = page_json['tickets']
 		for ticket in tickets:
 			ticket_id = ticket["id"]
-			print ('getting ticket') #+ str(ticket_id)
+			print ('getting ticket ' + str(ticket_id))
 
 			sql_subject = ticket['subject']
 			sql_created_at = ticket['created_at']
@@ -85,26 +86,31 @@ try:
 			cur.execute("INSERT INTO Tickets VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)", (int(sql_ticket_id), int(ticket_id), sql_subject, sql_created_at, sql_email, sql_assigned_to, sql_html, sql_label, sql_status))
 
 			#get attachments for ticket
-			attachments = ticket['content']['attachments']
-			for attachment in attachments:
-				print('getting attachments for ticket ' + str(ticket_id))
-				image_url = attachment['url']['original'] + '?auth_token={0}'.format(auth_token)
-				image_response = requests.get(image_url, timeout=timeout, verify=False)
-				image = image_response.content
-				sql_att_content = lite.Binary(image)
-				sql_att_file_name = attachment['filename']
-				sql_att_created_date = attachment['created_at']
-				sql_att_content_type = attachment['content_type']
-				cur.execute("INSERT INTO TicketAttachments VALUES(?, ?, ?, ?, ?, ?)", (int(sql_attachment_id), int(sql_ticket_id), sql_att_file_name, sql_att_created_date, sql_att_content_type, sql_att_content))
+			if 'attachments' in ticket['content']:
+				attachments = ticket['content']['attachments']
+				for attachment in attachments:
+					ticket_id = ticket["id"]
+					print('getting attachments for ticket ' + str(ticket_id))
+					image_url = attachment['url']['original'] + '?auth_token={0}'.format(auth_token)
+					image_response = requests.get(image_url, timeout=timeout, verify=False)
+					image = image_response.content
+					sql_att_content = lite.Binary(image)
+					sql_att_file_name = attachment['filename']
+					sql_att_created_date = attachment['created_at']
+					sql_att_content_type = attachment['content_type']
+					cur.execute("INSERT INTO TicketAttachments VALUES(?, ?, ?, ?, ?, ?)", (int(sql_attachment_id), int(ticket_id), sql_att_file_name, sql_att_created_date, sql_att_content_type, sql_att_content))
 				sql_attachment_id += 1
+			pass
 				
 			#get replies for ticket
 			print('getting replies for ticket ' + str(ticket_id))
+			ticket_id = ticket["id"]
 			replies_response = requests.get("{0}/tickets/{1}/replies?auth_token={2}".format(base_url, str(ticket_id), auth_token), timeout=timeout, verify=False, headers={'Content-type': 'application/json', 'Accept': 'application/json'})
 			replies = replies_response.json()['replies']
 
 			for reply in replies:
 				#insert the reply to the db
+				ticket_id = ticket["id"]
 				sql_r_created_date = reply['created_at']
 				sql_r_created_by = reply['replier']['email']
 				sql_r_html = ticket['content']['html']
@@ -114,7 +120,8 @@ try:
 				if 'content' in reply:
 					r_attachments = reply['content']['attachments']
 					for attachment in r_attachments:
-						print('getting attachments for reply') + str(sql_reply_id)
+						print('getting attachments for reply ' + str(sql_reply_id))
+						ticket_id = ticket["id"]
 						image_url = attachment['url']['original'] + '?auth_token={0}'.format(auth_token)
 						image_response = requests.get(image_url, timeout=timeout, verify=False)
 						image = image_response.content
@@ -122,24 +129,26 @@ try:
 						sql_att_file_name = attachment['filename']
 						sql_att_created_date = attachment['created_at']
 						sql_att_content_type = attachment['content_type']
-						cur.execute("INSERT INTO ReplyAttachments VALUES(?, ?, ?, ?, ?, ?)", (int(sql_r_attachment_id), int(sql_reply_id), sql_att_file_name, sql_att_created_date, sql_att_content_type, sql_att_content))
-						sql_attachment_id += 1	
+						cur.execute("INSERT INTO ReplyAttachments VALUES(?, ?, ?, ?, ?, ?, ?)", (int(sql_r_attachment_id), int(sql_reply_id), int(ticket_id), sql_att_file_name, sql_att_created_date, sql_att_content_type, sql_att_content))
+					sql_r_attachment_id += 1
 				pass
 
 				sql_reply_id += 1
 
 
 			#get comments for ticket
+			ticket_id = ticket["id"]
 			print('getting comments for ticket ' + str(ticket_id))
 			comments_response = requests.get("{0}/tickets/{1}/comments?auth_token={2}".format(base_url, str(ticket_id), auth_token), timeout=timeout, verify=False, headers={'Content-type': 'application/json', 'Accept': 'application/json'})
 			comments = comments_response.json()['comments']
 
 			for comment in comments:
 				#insert the comment to the db
+				ticket_id = ticket["id"]
 				sql_c_created_date = comment['created_at']
 				sql_c_created_by = comment['commenter']['email']
 				sql_c_html = ticket['content']['html']
-				cur.execute("INSERT INTO Comments VALUES(?, ?, ?, ?, ?)", (int(sql_comment_id), int(sql_ticket_id), sql_c_created_date, sql_c_created_by, sql_c_html))
+				cur.execute("INSERT INTO Comments VALUES(?, ?, ?, ?, ?)", (int(sql_comment_id), int(ticket_id), sql_c_created_date, sql_c_created_by, sql_c_html))
 
 				#get attachments for comment
 				c_attachments = comment['content']['attachments']
@@ -152,7 +161,7 @@ try:
 					sql_att_created_date = attachment['created_at']
 					sql_att_content_type = attachment['content_type']
 					cur.execute("INSERT INTO CommentAttachments VALUES(?, ?, ?, ?, ?, ?)", (int(sql_c_attachment_id), int(sql_comment_id), sql_att_file_name, sql_att_created_date, sql_att_content_type, sql_att_content))
-					sql_c_attachment_id += 1
+				sql_c_attachment_id += 1
 
 				sql_comment_id += 1
 
