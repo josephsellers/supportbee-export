@@ -1,181 +1,208 @@
 import requests
 import sqlite3 as lite
-import sys
-from io import StringIO
-from PIL import Image
-import io
+from time import sleep
 
-base_url = 'https://[[INSERT-COMPANY-NAME]].supportbee.com/'
-auth_token = '[[INSERT-AUTH-TOKEN]]'
-
-#get the total number of tickets
-#more options here: https://developers.supportbee.com/api
+TIMEOUT = 60
+AUTH_TOKEN = '[[INSERT-AUTH-TOKEN]]'
+BASE_URL = 'https://[[INSERT-COMPANY-NAME]].supportbee.com/'
+HEADERS = {'Content-type': 'application/json', 'Accept': 'application/json'}
 requests.packages.urllib3.disable_warnings()
-response = requests.get("{0}/tickets?auth_token={1}&archived=any&per_page=1&page=1".format(base_url, auth_token), verify=False, headers={'Content-type': 'application/json', 'Accept': 'application/json'})
 
-page = response.json()
-total_tickets = page['total']
+class SupportBee():
+    def __init__(self):
+        self.base_url = BASE_URL
+        self.auth_token = AUTH_TOKEN
+        self.client = requests.session()
+        self.client.headers.update(HEADERS)
+        self.total_tickets = self.get_total_ticket_count()
+        self.total_pages = self.total_tickets // 100 + 1
+        self.con = lite.connect('supportbee.sqlite')
+        self.clean_n_create_tables()
+        self.start_page = int(input(f"[REQUIRED] WHICH PAGE WOULD YOU LIKE TO START FROM [1-{self.total_pages}]: "))
+        print("--" * 20)
 
-con = None
-timeout = 60
+    def get_total_ticket_count(self):
+        url = f"{BASE_URL}/tickets?auth_token={AUTH_TOKEN}&archived=any&per_page=1&page=1"
+        response = self.client.get(url, verify=False, headers=HEADERS)
+        if response.status_code == 200:
+            page = response.json()
+            total_tickets = page['total']
+            print(f"[+] GOT TOTAL TICKETS COUNT: {total_tickets}")
+            return total_tickets
+        else:
+            print(f"[!] GOT TOTAL TICKETS COUNT")
+            return None
 
-try:
+    def clean_n_create_tables(self):
+        with self.con:
+            cur = self.con.cursor()
+            # print("[I] CLEANING DATABASE")
+            # cur.execute("DROP TABLE IF EXISTS Tickets")
+            # cur.execute("DROP TABLE IF EXISTS TicketAttachments")
+            # cur.execute("DROP TABLE IF EXISTS Replies")
+            # cur.execute("DROP TABLE IF EXISTS ReplyAttachments")
+            # cur.execute("DROP TABLE IF EXISTS Comments")
+            # cur.execute("DROP TABLE IF EXISTS CommentAttachments")
+            # print("[+] DATABASE CLEANED")
 
-	#create or connect to an existing database
-	con = lite.connect('supportbee.sqlite')
-
-	with con:
-	    
-	    #create the db schema
-	    cur = con.cursor()   
-	    cur.execute("DROP TABLE IF EXISTS Tickets")
-	    cur.execute("DROP TABLE IF EXISTS TicketAttachments")
-	    cur.execute("DROP TABLE IF EXISTS Replies")
-	    cur.execute("DROP TABLE IF EXISTS ReplyAttachments")
-	    cur.execute("DROP TABLE IF EXISTS Comments")
-	    cur.execute("DROP TABLE IF EXISTS CommentAttachments")
-
-	    cur.execute("CREATE TABLE Tickets(Id INT PRIMARY KEY ASC, SupportbeeID INT, Subject TEXT, CreationDate TEXT, CreatedBy TEXT, AssignedTo TEXT, Content TEXT, Label TEXT, Status TEXT)")
-	    cur.execute("CREATE TABLE TicketAttachments(Id INT, TicketId INT, FileName TEXT, CreationDate TEXT, ContentType TEXT, File BLOB)")
-	    cur.execute("CREATE TABLE Replies(Id INT PRIMARY KEY ASC, SupportbeeID INT, Subject TEXT, CreationDate TEXT, Replier TEXT, Content TEXT, Label TEXT, Status TEXT)")
-	    cur.execute("CREATE TABLE ReplyAttachments(Id INT, TicketId INT, SupportbeeID INT, FileName TEXT, CreationDate TEXT, ContentType TEXT, File BLOB)")
-	    cur.execute("CREATE TABLE Comments(Id INT PRIMARY KEY ASC, TicketId INT, CreationDate TEXT, CreatedBy TEXT, Content TEXT)")
-	    cur.execute("CREATE TABLE CommentAttachments(Id INT PRIMARY KEY ASC, CommentId INT, FileName TEXT, CreationDate TEXT, ContentType TEXT, File BLOB)")
-
-	page_count = 1
-	sql_ticket_id = 1
-	sql_reply_id = 1
-	sql_comment_id = 1
-	sql_attachment_id = 1
-	sql_r_attachment_id = 1
-	sql_c_attachment_id = 1
-
-
-	#loop pages
-	while (page_count <= total_tickets / 100):
-		print('getting page ' + str(page_count))
-		response = requests.get("{0}/tickets?auth_token={1}&archived=any&per_page=100&page={2}".format(base_url, auth_token, str(page_count)), timeout=timeout, verify=False, headers={'Content-type': 'application/json', 'Accept': 'application/json'})
-		page_json = response.json()
-		page_count += 1
-		
-		#loop tickets
-		tickets = page_json['tickets']
-		for ticket in tickets:
-			ticket_id = ticket["id"]
-			print ('getting ticket ' + str(ticket_id))
-
-			sql_subject = ticket['subject']
-			sql_created_at = ticket['created_at']
-			sql_email = ticket['requester']['email']
-			sql_html = ticket['content']['html']
-
-			sql_assigned_to = ''
-			if ('current_assignee' in ticket):
-				if ('user' in ticket['current_assignee']):
-					sql_assigned_to = ticket['current_assignee']['user']['email']
-
-			if (ticket['archived'] is False):
-				sql_status = 'In Progress'
-			else:
-				sql_status = 'Closed'
-
-			sql_label = 'imported'
-			for l in ticket['labels']:
-				sql_label += ',%s' % l['name']
-
-			cur.execute("INSERT INTO Tickets VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)", (int(sql_ticket_id), int(ticket_id), sql_subject, sql_created_at, sql_email, sql_assigned_to, sql_html, sql_label, sql_status))
-
-			#get attachments for ticket
-			if 'attachments' in ticket['content']:
-				attachments = ticket['content']['attachments']
-				for attachment in attachments:
-					ticket_id = ticket["id"]
-					print('getting attachments for ticket ' + str(ticket_id))
-					image_url = attachment['url']['original'] + '?auth_token={0}'.format(auth_token)
-					image_response = requests.get(image_url, timeout=timeout, verify=False)
-					image = image_response.content
-					sql_att_content = lite.Binary(image)
-					sql_att_file_name = attachment['filename']
-					sql_att_created_date = attachment['created_at']
-					sql_att_content_type = attachment['content_type']
-					cur.execute("INSERT INTO TicketAttachments VALUES(?, ?, ?, ?, ?, ?)", (int(sql_attachment_id), int(ticket_id), sql_att_file_name, sql_att_created_date, sql_att_content_type, sql_att_content))
-				sql_attachment_id += 1
-			pass
-				
-			#get replies for ticket
-			print('getting replies for ticket ' + str(ticket_id))
-			ticket_id = ticket["id"]
-			replies_response = requests.get("{0}/tickets/{1}/replies?auth_token={2}".format(base_url, str(ticket_id), auth_token), timeout=timeout, verify=False, headers={'Content-type': 'application/json', 'Accept': 'application/json'})
-			replies = replies_response.json()['replies']
-
-			for reply in replies:
-				#insert the reply to the db
-				ticket_id = ticket["id"]
-				sql_r_created_date = reply['created_at']
-				sql_r_created_by = reply['replier']['email']
-				sql_r_html = ticket['content']['html']
-				cur.execute("INSERT INTO Replies VALUES(?, ?, ?, ?, ?, ?, ?, ?)", (int(sql_reply_id), int(ticket_id), sql_subject, sql_r_created_date, sql_r_created_by, sql_r_html, sql_label, sql_status))
-
-				#get attachments for reply
-				if 'content' in reply:
-					r_attachments = reply['content']['attachments']
-					for attachment in r_attachments:
-						print('getting attachments for reply ' + str(sql_reply_id))
-						ticket_id = ticket["id"]
-						image_url = attachment['url']['original'] + '?auth_token={0}'.format(auth_token)
-						image_response = requests.get(image_url, timeout=timeout, verify=False)
-						image = image_response.content
-						sql_att_content = lite.Binary(image)
-						sql_att_file_name = attachment['filename']
-						sql_att_created_date = attachment['created_at']
-						sql_att_content_type = attachment['content_type']
-						cur.execute("INSERT INTO ReplyAttachments VALUES(?, ?, ?, ?, ?, ?, ?)", (int(sql_r_attachment_id), int(sql_reply_id), int(ticket_id), sql_att_file_name, sql_att_created_date, sql_att_content_type, sql_att_content))
-					sql_r_attachment_id += 1
-				pass
-
-				sql_reply_id += 1
+            print("[I] CREATING TABLES")
+            cur.execute("CREATE TABLE IF NOT EXISTS Tickets(Id INTEGER PRIMARY KEY, SupportbeeID TEXT, Subject TEXT, CreationDate TEXT, CreatedBy TEXT, AssignedTo TEXT, Content TEXT, Label TEXT, Status TEXT)")
+            cur.execute("CREATE TABLE IF NOT EXISTS TicketAttachments(Id INTEGER PRIMARY KEY, TicketID INT, SupportbeeID TEXT, FileName TEXT, CreationDate TEXT, ContentType TEXT, File BLOB)")
+            cur.execute("CREATE TABLE IF NOT EXISTS Replies(Id INTEGER PRIMARY KEY, TicketID INT, SupportbeeID TEXT, Subject TEXT, CreationDate TEXT, Replier TEXT, Content TEXT, Label TEXT, Status TEXT)")
+            cur.execute("CREATE TABLE IF NOT EXISTS ReplyAttachments(Id INTEGER PRIMARY KEY, ReplyID INT, SupportbeeID TEXT, FileName TEXT, CreationDate TEXT, ContentType TEXT, File BLOB)")
+            cur.execute("CREATE TABLE IF NOT EXISTS Comments(Id INTEGER PRIMARY KEY, SupportbeeID TEXT, CreationDate TEXT, CreatedBy TEXT, Content TEXT)")
+            cur.execute("CREATE TABLE IF NOT EXISTS CommentAttachments(Id INTEGER PRIMARY KEY, CommentId INT, FileName TEXT, CreationDate TEXT, ContentType TEXT, File BLOB)")
+            print("[+] TABLES CREATED")
 
 
-			#get comments for ticket
-			ticket_id = ticket["id"]
-			print('getting comments for ticket ' + str(ticket_id))
-			comments_response = requests.get("{0}/tickets/{1}/comments?auth_token={2}".format(base_url, str(ticket_id), auth_token), timeout=timeout, verify=False, headers={'Content-type': 'application/json', 'Accept': 'application/json'})
-			comments = comments_response.json()['comments']
+    def get_ticket_data(self, page_count):
+        print(f"[I][{page_count}/{self.total_pages}] GETTING TICKET DATA FROM PAGE")
+        url = f"{BASE_URL}/tickets?auth_token={AUTH_TOKEN}&archived=any&per_page=100&page={page_count}"
+        resp = self.client.get(url, timeout=TIMEOUT)
+        if resp.status_code == 200:
+            print(f"[+][{page_count}/{self.total_pages}] GOT TICKET DATA")
+            json_data = resp.json()
+            total_tickets = len(json_data['tickets'])
+            ticket_count = 0
+            for idx, ticket in enumerate(json_data['tickets'], start=1):
+                ticket_id = ticket["id"]
+                print(f"[I][{idx}/{total_tickets}] TICKET DATA: {ticket_id}")
+                ticket_subject = ticket['subject']
+                ticket_created_at = ticket['created_at']
+                ticket_email = ticket['requester']['email']
+                ticket_html = ticket['content']['html']
 
-			for comment in comments:
-				#insert the comment to the db
-				ticket_id = ticket["id"]
-				sql_c_created_date = comment['created_at']
-				sql_c_created_by = comment['commenter']['email']
-				sql_c_html = ticket['content']['html']
-				cur.execute("INSERT INTO Comments VALUES(?, ?, ?, ?, ?)", (int(sql_comment_id), int(ticket_id), sql_c_created_date, sql_c_created_by, sql_c_html))
+                ticket_assigned_to = ''
+                if 'current_assignee' in ticket:
+                    if 'user' in ticket['current_assignee']:
+                        ticket_assigned_to = ticket['current_assignee']['user']['email']
 
-				#get attachments for comment
-				c_attachments = comment['content']['attachments']
-				for attachment in c_attachments:
-					print('getting attachments for comment') + str(sql_comment_id)
-					image_url = attachment['url']['original'] + '?auth_token={0}'.format(auth_token)
-					image_response = requests.get(image_url, timeout=timeout, verify=False)
-					sql_att_content = lite.Binary(image_response.content)
-					sql_att_file_name = attachment['filename']
-					sql_att_created_date = attachment['created_at']
-					sql_att_content_type = attachment['content_type']
-					cur.execute("INSERT INTO CommentAttachments VALUES(?, ?, ?, ?, ?, ?)", (int(sql_c_attachment_id), int(sql_comment_id), sql_att_file_name, sql_att_created_date, sql_att_content_type, sql_att_content))
-				sql_c_attachment_id += 1
+                ticket_status = 'In Progress' if ticket['archived'] is False else 'Closed'
+                ticket_label = 'imported,' + ','.join(l['name'] for l in ticket['labels'])
+                with self.con:
+                    cur = self.con.cursor()
+                    cur.execute("INSERT INTO Tickets (SupportbeeID, Subject, CreationDate, CreatedBy, AssignedTo, Content, Label, Status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                                (int(ticket_id), ticket_subject, ticket_created_at, ticket_email, ticket_assigned_to, ticket_html, ticket_label, ticket_status))
+                    ticket_count = cur.lastrowid
+                    print(f"[+] ADDED TICKET DATA TO DATABASE: {ticket_count}")
+                
+                # Here we check if the ticket has any attachments. If it has attachments we need t add that to the database
+                if 'attachments' in ticket['content']:
+                    attachments = ticket['content']['attachments']
+                    for attachment in attachments:
+                        print(f"[I] ATTACHMENT FOUND FOR TICKET: {ticket_id}")
+                        image_url = attachment['url']['original'] + f'?auth_token={self.auth_token}'
+                        image_response = self.client.get(image_url, timeout=TIMEOUT, verify=False)
+                        image = image_response.content
+                        attachment_content = lite.Binary(image)
+                        attachment_file_name = attachment['filename']
+                        attachment_created_date = attachment['created_at']
+                        attachment_content_type = attachment['content_type']
+                        with self.con:
+                            cur = self.con.cursor()
+                            cur.execute("INSERT INTO TicketAttachments (TicketID, SupportbeeID, FileName, CreationDate, ContentType, File) VALUES (?, ?, ?, ?, ?, ?)",
+                                        (ticket_count, ticket_id, attachment_file_name, attachment_created_date, attachment_content_type, attachment_content))
+                            print("[+] ADDED ATTACHMENT")
+                        sleep(0.5)
+                
 
-				sql_comment_id += 1
+                # We need to get ticket replies if there are any and add them to the database
+                sleep(0.5)
+                print(f"[I] GETTING REPLIES FOR TICKET: {ticket_id}")
+                replies_url = f"{self.base_url}/tickets/{ticket_id}/replies?auth_token={self.auth_token}"
+                replies_response = self.client.get(replies_url, timeout=TIMEOUT)
+                if replies_response.status_code == 200:
+                    reply_count = 0
+                    replies = replies_response.json()['replies']
+                    if len(replies) != 0:
+                        print(f"[+] GOT REPLIES FOR TICKET: {ticket_id}")
+                        for reply in replies:
+                            reply_created_date = reply['created_at']
+                            reply_created_by = reply['replier']['email']
+                            reply_html = ticket['content']['html']
+                            with self.con:
+                                cur = self.con.cursor()
+                                cur.execute("INSERT INTO Replies (TicketID, SupportbeeID, Subject, CreationDate, Replier, Content, Label, Status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                                            (ticket_count, ticket_id, ticket_subject, reply_created_date, reply_created_by, reply_html, ticket_label, ticket_status))
+                                reply_count = cur.lastrowid
+                                print(f"[+] ADDED REPLY TO THE DATABASE: {reply_count}")
 
-			sql_ticket_id += 1
-			con.commit()
+                            if 'content' in reply:
+                                content_attachments = reply['content']['attachments']
+                                for attachment in content_attachments:
+                                    print(f"[I] GETTING ATTACHMENT FOR REPLY")
+                                    image_url = attachment['url']['original'] + f'?auth_token={self.auth_token}'
+                                    image_response = self.client.get(image_url, timeout=TIMEOUT, verify=False)
+                                    image = image_response.content
+                                    reply_att_content = lite.Binary(image)
+                                    reply_att_file_name = attachment['filename']
+                                    reply_att_created_date = attachment['created_at']
+                                    replyatt_content_type = attachment['content_type']
+                                    with self.con:
+                                        cur = self.con.cursor()
+                                        cur.execute("INSERT INTO ReplyAttachments (ReplyID, SupportbeeID, FileName, CreationDate, ContentType, File) VALUES (?, ?, ?, ?, ?, ?)",
+                                                    (reply_count, ticket_id, reply_att_file_name, reply_att_created_date, replyatt_content_type, reply_att_content))
+                                        print(f"[+] ADDED ATTACHMENT FOR REPLY")
+                                    sleep(0.5)
+                    else:
+                        print(f"[-] NO REPLIES ARE FOUND FOR TICKET: {ticket_id}")
 
-	print('done with no errors.')
 
-except lite.Error as er:
-    
-    print("Error %s:") % e.args[0]
-    sys.exit(1)
-    
-finally:
+                # We need to get ticket comments if there are any and add them to the database
+                sleep(0.5)
+                print(f"[I] GETTING COMMENTS FOR TICKET: {ticket_id}")
+                comments_url = f"{self.base_url}/tickets/{ticket_id}/comments?auth_token={self.auth_token}"
+                comments_response = self.client.get(comments_url, timeout=TIMEOUT)
+                if comments_response.status_code == 200:
+                    comments = comments_response.json()['comments']
+                    if len(comments) != 0:
+                        print("[+] GOT TICKET COMMENTS")
+                        comment_id = 0
+                        for comment in comments:
+                            ticket_id = ticket["id"]
+                            comment_created_date = comment['created_at']
+                            comment_created_by = comment['commenter']['email']
+                            comment_html = ticket['content']['html']
+                            with self.con:
+                                cur = self.con.cursor()
+                                cur.execute("INSERT INTO Comments (SupportbeeID, CreationDate, CreatedBy, Content) VALUES (?, ?, ?, ?)",
+                                        (ticket_id, comment_created_date, comment_created_by, comment_html))
+                                comment_id = cur.lastrowid
+                                print(f"[+] ADDED COMMENT TO THE DATABASE: {comment_id}")
 
-	if con:
-		con.close()
+                            c_attachments = comment['content']['attachments']
+                            for attachment in c_attachments:
+                                print("[I] GETTING COMMENT ATTACHMENT")
+                                image_url = attachment['url']['original'] + f'?auth_token={self.auth_token}'
+                                image_response = self.client.get(image_url, timeout=TIMEOUT, verify=False)
+                                comment_att_content = lite.Binary(image_response.content)
+                                comment_att_file_name = attachment['filename']
+                                comment_att_created_date = attachment['created_at']
+                                comment_att_content_type = attachment['content_type']
+                                with self.con:
+                                    cur = self.con.cursor()
+                                    cur.execute("INSERT INTO CommentAttachments (CommentId, FileName, CreationDate, ContentType, File) VALUES (?, ?, ?, ?, ?)",
+                                                (comment_id, comment_att_file_name, comment_att_created_date, comment_att_content_type, comment_att_content))
+                                    print("[+] ADDED COMMENT ATTACHMENT TO THE DATABASE")
+                                sleep(0.5)
+                    else:
+                        print("[-] NO COMMENTS ARE FOUND")
+                self.con.commit()
+                print("--" * 15)
+        else:
+            print(f"[!] COULD NOT GET TICKET DATA: STATUS CODE: {resp.status_code} | {resp.text}")
+        
+        sleep(2)
+
+
+    def process_tickets_data(self):
+        page_count = 1
+        for page_count in range(self.start_page, self.total_pages+1):
+            try:
+                self.get_ticket_data(page_count)
+            except Exception as e:
+                print(f"[!] COULD NOT PROCESS PAGE: {page_count} | ERROR: {e}")
+
+if __name__ == '__main__':
+    supportbee = SupportBee()
+    supportbee.process_tickets_data()
